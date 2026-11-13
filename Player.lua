@@ -250,7 +250,11 @@ function Flight:_resolveControls()
             local playerModule = scripts and scripts:FindFirstChild("PlayerModule")
             local starterModule = game:GetService("StarterPlayer"):FindFirstChild("PlayerModule")
             -- In the 2026 Input Action System the old GetControls may be absent.
-            for _, module in ipairs({playerModule, starterModule}) do
+            -- Build a compact list: ipairs({nil, starterModule}) would skip it.
+            local candidates = {}
+            if playerModule then table.insert(candidates, playerModule) end
+            if starterModule then table.insert(candidates, starterModule) end
+            for _, module in ipairs(candidates) do
                 if module then
                     local contexts = module:FindFirstChild("InputContexts")
                     local moveAction = contexts and contexts:FindFirstChild("MoveAction", true)
