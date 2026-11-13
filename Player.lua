@@ -199,13 +199,31 @@ function Flight:_applyManual()
     self.speedReadout.Text = tostring(value)
 end
 
+-- The main Fly switch and the mini-panel button request flight independently
+-- of whether a valid character has finished loading.
+function Flight:_physicsReady()
+    local character = self.context.player.Character
+    return self.heartbeat ~= nil
+        and character ~= nil
+        and self.humanoid ~= nil and self.humanoid.Parent == character
+        and self.humanoid.Health > 0
+        and self.root ~= nil and self.root.Parent == character
+        and self.velocity ~= nil and self.velocity.Parent == self.root
+        and self.gyro ~= nil and self.gyro.Parent == self.root
+end
+
 function Flight:_stopPhysics()
     if self.heartbeat then self.heartbeat:Disconnect(); self.heartbeat = nil end
     if self.velocity then self.velocity:Destroy(); self.velocity = nil end
     if self.gyro then self.gyro:Destroy(); self.gyro = nil end
     if self.humanoid and self.humanoid.Parent then
-        self.humanoid.PlatformStand = self.oldPlatformStand
-        self.humanoid.AutoRotate = self.oldAutoRotate
+        self.humanoid.PlatformStand = self.oldPlatformStand == true
+        self.humanoid.AutoRotate = self.oldAutoRotate ~= false
+        if not self.oldPlatformStand and self.humanoid.Health > 0 then
+            pcall(function()
+                self.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end)
+        end
     end
     if self.root and self.root.Parent then
         self.root.AssemblyLinearVelocity = Vector3.zero
@@ -215,107 +233,185 @@ function Flight:_stopPhysics()
     self.root = nil
     self.upHeld = false
     self.downHeld = false
+    self.smoothedVelocity = Vector3.zero
+    if self.power then self:_refreshPower() end
 end
 
--- Mobile thumbstick support inspired by FE Mobile Fly.
--- GetControls is preferred; legacy ControlModule and keys remain fallback.
-function Flight:_getMoveVector()
-    if not self.controlsResolved then
-        self.controlsResolved = true
-        local scripts = self.context.player:FindFirstChild("PlayerScripts")
-        local module = scripts and scripts:FindFirstChild("PlayerModule")
-        if module then
-            local ok, api = pcall(require, module)
-            if ok and api then
-                local okControls, controls = pcall(function()
-                    return api:GetControls()
-                end)
-                if okControls and controls
-                    and type(controls.GetMoveVector) == "function" then
-                    self.controls = controls
+-- Roblox has two generations of built-in controls. Resolve asynchronously:
+-- requires must never suspend the live physics callback or HORIZON startup.
+function Flight:_resolveControls()
+    if self.controls or (self.moveAction and self.moveAction.Parent) then return end
+    if self.controlsResolving or os.clock() < (self.nextControlResolve or 0) then return end
+    self.controlsResolving = true
+    self.nextControlResolve = os.clock() + 2
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local scripts = self.context.player:FindFirstChild("PlayerScripts")
+            local playerModule = scripts and scripts:FindFirstChild("PlayerModule")
+            local starterModule = game:GetService("StarterPlayer"):FindFirstChild("PlayerModule")
+            -- In the 2026 Input Action System the old GetControls may be absent.
+            for _, module in ipairs({playerModule, starterModule}) do
+                if module then
+                    local contexts = module:FindFirstChild("InputContexts")
+                    local moveAction = contexts and contexts:FindFirstChild("MoveAction", true)
+                    if moveAction and moveAction:IsA("InputAction") then
+                        self.moveAction = moveAction
+                        return
+                    end
                 end
             end
-            if not self.controls then
-                local legacy = module:FindFirstChild("ControlModule")
-                if legacy then
-                    local okLegacy, controls = pcall(require, legacy)
-                    if okLegacy and controls
+            if playerModule then
+                local required, api = pcall(require, playerModule)
+                if required and api then
+                    local got, controls = pcall(function() return api:GetControls() end)
+                    if got and controls and type(controls.GetMoveVector) == "function" then
+                        self.controls = controls
+                        return
+                    end
+                end
+                local oldModule = playerModule:FindFirstChild("ControlModule")
+                if oldModule then
+                    local loaded, controls = pcall(require, oldModule)
+                    if loaded and controls
                         and type(controls.GetMoveVector) == "function" then
                         self.controls = controls
                     end
                 end
             end
+        end)
+        self.controlsResolving = false
+        if not ok and not self.warnedControls then
+            self.warnedControls = true
+            warn("[HORIZON Fly] Control resolution: " .. tostring(err))
+        end
+    end)
+end
+
+function Flight:_getMoveVector()
+    self:_resolveControls()
+    if self.moveAction and self.moveAction.Parent then
+        local ok, vector = pcall(function() return self.moveAction:GetState() end)
+        if ok and typeof(vector) == "Vector3" then return vector end
+        if ok and typeof(vector) == "Vector2" then
+            -- MoveAction's Up is +Y; the legacy fly controller's forward is -Z.
+            return Vector3.new(vector.X, 0, -vector.Y)
         end
     end
-    if not self.controls then return nil end
-    local ok, vector = pcall(function()
-        return self.controls:GetMoveVector()
-    end)
-    if ok and typeof(vector) == "Vector3" then return vector end
+    if self.controls then
+        local ok, vector = pcall(function()
+            return self.controls:GetMoveVector()
+        end)
+        if ok and typeof(vector) == "Vector3" then return vector end
+        if ok and typeof(vector) == "Vector2" then
+            return Vector3.new(vector.X, 0, -vector.Y)
+        end
+    end
     return nil
 end
 
 function Flight:_startPhysics()
     self:_stopPhysics()
-    if not self.enabled or not self.flightActive then return end
-    local char = self.context.player.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not hum or not root or hum.Health <= 0 then return end
-    self.humanoid = hum
-    self.root = root
-    self.oldPlatformStand = hum.PlatformStand
-    self.oldAutoRotate = hum.AutoRotate
-    hum.PlatformStand = true
-    hum.AutoRotate = false
+    if not self.enabled or not self.flightActive then return false end
+    local character = self.context.player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root or humanoid.Health <= 0 then return false end
+
+    -- Remove orphaned constraints left by a previous HORIZON instance.
+    for _, name in ipairs({"HorizonFlyVelocity", "HorizonFlyGyro"}) do
+        local stale = root:FindFirstChild(name)
+        if stale then stale:Destroy() end
+    end
+
+    self.humanoid, self.root = humanoid, root
+    self.oldPlatformStand = humanoid.PlatformStand
+    self.oldAutoRotate = humanoid.AutoRotate
+    humanoid.PlatformStand = true
+    humanoid.AutoRotate = false
+
     local velocity = Instance.new("BodyVelocity")
     velocity.Name = "HorizonFlyVelocity"
-    velocity.MaxForce = Vector3.new(1e12, 1e12, 1e12)
-    velocity.P = 12500
+    velocity.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+    velocity.P = 1250
     velocity.Velocity = Vector3.zero
     velocity.Parent = root
     self.velocity = velocity
+
     local gyro = Instance.new("BodyGyro")
     gyro.Name = "HorizonFlyGyro"
-    gyro.MaxTorque = Vector3.new(1e12, 1e12, 1e12)
-    gyro.P = 12000
-    gyro.D = 600
+    gyro.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+    gyro.P = 1000
+    gyro.D = 50
     gyro.CFrame = root.CFrame
     gyro.Parent = root
     self.gyro = gyro
+    self.smoothedVelocity = Vector3.zero
 
-    self.heartbeat = self.runService.Heartbeat:Connect(function()
-        if not self.enabled or not self.flightActive or not root.Parent or hum.Health <= 0 then
+    self.heartbeat = self.runService.Heartbeat:Connect(function(dt)
+        if not self.enabled or not self.flightActive or not self:_physicsReady() then
             self:_stopPhysics()
             return
         end
         local camera = workspace.CurrentCamera
-        if not camera then return end
-        local look = camera.CFrame.LookVector
-        local right = camera.CFrame.RightVector
-        local fwd = Vector3.new(look.X, 0, look.Z)
-        fwd = fwd.Magnitude > 0.001 and fwd.Unit or Vector3.new(0, 0, -1)
+        if not camera then
+            velocity.Velocity = Vector3.zero
+            return
+        end
+
         local keys = self.moving
-        local x = (keys.D and 1 or 0) - (keys.A and 1 or 0)
-        local z = (keys.S and 1 or 0) - (keys.W and 1 or 0)
-        local control = self:_getMoveVector()
-        if control and control.Magnitude > 0.01 then
-            x, z = control.X, control.Z
+        local keyX = (keys.D and 1 or 0) - (keys.A and 1 or 0)
+        local keyZ = (keys.S and 1 or 0) - (keys.W and 1 or 0)
+        local input = self:_getMoveVector()
+        local x = input and input.X or keyX
+        local z = input and input.Z or keyZ
+        if input and input.Magnitude <= 0.01 and (keyX ~= 0 or keyZ ~= 0) then
+            x, z = keyX, keyZ
         end
-        -- Full camera tilt permits flying diagonally up/down via joystick.
-        local horizontal = right * x - look * z
-        if not control and x == 0 and z == 0 then
-            local move = hum.MoveDirection
-            horizontal = Vector3.new(move.X, 0, move.Z)
+
+        local direction = camera.CFrame.RightVector * x
+            - camera.CFrame.LookVector * z
+        -- Use world-space fallback only when no working module/keys are moving.
+        if math.abs(x) < 0.01 and math.abs(z) < 0.01 then
+            local move = humanoid.MoveDirection
+            if move.Magnitude > 0.01 then
+                direction = move
+            end
         end
-        if horizontal.Magnitude > 1 then horizontal = horizontal.Unit end
         local vertical = ((self.upHeld or keys.Up) and 1 or 0)
             - ((self.downHeld or keys.Down) and 1 or 0)
-        local direction = horizontal + Vector3.new(0, vertical, 0)
+        direction = direction + Vector3.new(0, vertical, 0)
         if direction.Magnitude > 1 then direction = direction.Unit end
-        velocity.Velocity = direction * self.speed
-        gyro.CFrame = CFrame.lookAt(root.Position, root.Position + fwd)
+
+        -- Responsive easing rather than snapping the avatar to a hard velocity.
+        local target = direction * self.speed
+        local alpha = math.clamp((dt or 1 / 60) * 12, 0, 1)
+        self.smoothedVelocity = self.smoothedVelocity:Lerp(target, alpha)
+        velocity.Velocity = self.smoothedVelocity
+        -- Match the reference Fly: follow the camera with gentler BodyGyro.
+        gyro.CFrame = camera.CFrame
     end)
+    self:_refreshPower()
+    return true
+end
+
+-- Retry on delayed character loading, respawn and destroyed constraints.
+-- A failed first attempt must never permanently strand an enabled toggle.
+function Flight:_ensurePhysics()
+    if not self.enabled or not self.flightActive then return end
+    if self:_physicsReady() then
+        if not self.humanoid.PlatformStand then
+            self.humanoid.PlatformStand = true
+        end
+        return
+    end
+    local ok, err = pcall(function() self:_startPhysics() end)
+    if not ok then
+        self:_stopPhysics()
+        if os.clock() >= (self.nextPhysicsWarning or 0) then
+            warn("[HORIZON Fly] Retry after physics error: " .. tostring(err))
+            self.nextPhysicsWarning = os.clock() + 5
+        end
+    end
 end
 
 function Flight:_bind()
@@ -422,15 +518,28 @@ function Flight:_bind()
         if not self.enabled or not self.flightActive then return end
         task.defer(function()
             if character:WaitForChild("HumanoidRootPart", 10)
-                and self.enabled and self.flightActive then self:_startPhysics() end
+                and self.enabled and self.flightActive then self:_ensurePhysics() end
         end)
+    end)
+    -- Lightweight 5 Hz watchdog; does nothing expensive while Fly is disabled.
+    local elapsed = 0
+    self:_listen(self.runService.Heartbeat, function(dt)
+        if not self.enabled or not self.flightActive then return end
+        elapsed = elapsed + dt
+        if elapsed < 0.2 then return end
+        elapsed = 0
+        self:_ensurePhysics()
     end)
 end
 
 function Flight:_refreshPower()
-    self.power.Text = self.flightActive and "Выключить Fly" or "Включить Fly"
-    self.power.BackgroundColor3 = self.flightActive
-        and Color3.fromRGB(104, 57, 53) or Color3.fromRGB(65, 106, 69)
+    local requested = self.enabled and self.flightActive
+    self.power.Text = requested and "Выключить Fly" or "Включить Fly"
+    -- Amber means requested but waiting for a valid character/physics.
+    self.power.BackgroundColor3 = requested
+        and (self:_physicsReady() and Color3.fromRGB(104, 57, 53)
+            or Color3.fromRGB(130, 94, 47))
+        or Color3.fromRGB(65, 106, 69)
 end
 
 function Flight:pauseFlight()
@@ -442,13 +551,15 @@ end
 function Flight:resumeFlight()
     if not self.enabled then return end
     self.flightActive = true
-    self:_startPhysics()
+    self:_ensurePhysics()
     self:_refreshPower()
 end
 
 function Flight:enable()
     if self.enabled then
         self.panel.Visible = true
+        if self.flightActive then self:_ensurePhysics() end
+        self:_refreshPower()
         return
     end
     self.enabled = true
@@ -462,8 +573,8 @@ function Flight:enable()
     self.context.tweens:Create(self.scale,
         TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
         {Scale = target}):Play()
+    self:_ensurePhysics()
     self:_refreshPower()
-    self:_startPhysics()
 end
 
 function Flight:disable()
