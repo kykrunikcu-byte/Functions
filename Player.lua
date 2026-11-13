@@ -22,6 +22,10 @@ function Flight.new(context)
     local self = setmetatable({}, Flight)
     self.context = context
     self.enabled = false
+    self.noclipEnabled = false
+    self.noclipConnection = nil
+    -- Weak keys avoid retaining obsolete character parts after respawn.
+    self.noclipOriginals = setmetatable({}, {__mode = "k"})
     self.speed = 50
     self.sliderValue = 50
     self.manualValue = 50
@@ -389,7 +393,54 @@ function Flight:disable()
     self.panel.Visible = false
 end
 
+-- Noclip uses the same idea as the user's Stepped loop: collisions are
+-- disabled again before simulation, because some games reset CanCollide.
+-- Each original value is remembered once and restored when switched off.
+function Flight:enableNoclip()
+    if self.noclipEnabled then return end
+    self.noclipEnabled = true
+    self.noclipOriginals = setmetatable({}, {__mode = "k"})
+
+    local function enforce()
+        if not self.noclipEnabled then return end
+        local char = self.context.player.Character
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if self.noclipOriginals[part] == nil then
+                    -- Lua tables cannot store nil, so use a boolean wrapper.
+                    self.noclipOriginals[part] = {original = part.CanCollide}
+                end
+                if part.CanCollide then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+
+    enforce()
+    -- PreSimulation (or the older Stepped event) avoids the wait(0.21)
+    -- that could let collisions return between physical updates.
+    local event = self.runService.PreSimulation or self.runService.Stepped
+    self.noclipConnection = event:Connect(enforce)
+end
+
+function Flight:disableNoclip()
+    self.noclipEnabled = false
+    if self.noclipConnection then
+        self.noclipConnection:Disconnect()
+        self.noclipConnection = nil
+    end
+    for part, info in pairs(self.noclipOriginals) do
+        if part and part.Parent and info then
+            pcall(function() part.CanCollide = info.original end)
+        end
+    end
+    self.noclipOriginals = setmetatable({}, {__mode = "k"})
+end
+
 function Flight:destroy()
+    self:disableNoclip()
     self:disable()
     for _, connection in ipairs(self.connections) do
         pcall(function() connection:Disconnect() end)
