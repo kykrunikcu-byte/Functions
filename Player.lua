@@ -217,6 +217,44 @@ function Flight:_stopPhysics()
     self.downHeld = false
 end
 
+-- Mobile thumbstick support inspired by FE Mobile Fly.
+-- GetControls is preferred; legacy ControlModule and keys remain fallback.
+function Flight:_getMoveVector()
+    if not self.controlsResolved then
+        self.controlsResolved = true
+        local scripts = self.context.player:FindFirstChild("PlayerScripts")
+        local module = scripts and scripts:FindFirstChild("PlayerModule")
+        if module then
+            local ok, api = pcall(require, module)
+            if ok and api then
+                local okControls, controls = pcall(function()
+                    return api:GetControls()
+                end)
+                if okControls and controls
+                    and type(controls.GetMoveVector) == "function" then
+                    self.controls = controls
+                end
+            end
+            if not self.controls then
+                local legacy = module:FindFirstChild("ControlModule")
+                if legacy then
+                    local okLegacy, controls = pcall(require, legacy)
+                    if okLegacy and controls
+                        and type(controls.GetMoveVector) == "function" then
+                        self.controls = controls
+                    end
+                end
+            end
+        end
+    end
+    if not self.controls then return nil end
+    local ok, vector = pcall(function()
+        return self.controls:GetMoveVector()
+    end)
+    if ok and typeof(vector) == "Vector3" then return vector end
+    return nil
+end
+
 function Flight:_startPhysics()
     self:_stopPhysics()
     if not self.enabled or not self.flightActive then return end
@@ -257,15 +295,18 @@ function Flight:_startPhysics()
         local right = camera.CFrame.RightVector
         local fwd = Vector3.new(look.X, 0, look.Z)
         fwd = fwd.Magnitude > 0.001 and fwd.Unit or Vector3.new(0, 0, -1)
-        local sideways = Vector3.new(right.X, 0, right.Z)
-        sideways = sideways.Magnitude > 0.001 and sideways.Unit or Vector3.new(1, 0, 0)
-        local move = hum.MoveDirection
-        local horizontal = Vector3.new(move.X, 0, move.Z)
         local keys = self.moving
-        local forwardAxis = (keys.W and 1 or 0) - (keys.S and 1 or 0)
-        local rightAxis = (keys.D and 1 or 0) - (keys.A and 1 or 0)
-        if forwardAxis ~= 0 or rightAxis ~= 0 then
-            horizontal = fwd * forwardAxis + sideways * rightAxis
+        local x = (keys.D and 1 or 0) - (keys.A and 1 or 0)
+        local z = (keys.S and 1 or 0) - (keys.W and 1 or 0)
+        local control = self:_getMoveVector()
+        if control and control.Magnitude > 0.01 then
+            x, z = control.X, control.Z
+        end
+        -- Full camera tilt permits flying diagonally up/down via joystick.
+        local horizontal = right * x - look * z
+        if not control and x == 0 and z == 0 then
+            local move = hum.MoveDirection
+            horizontal = Vector3.new(move.X, 0, move.Z)
         end
         if horizontal.Magnitude > 1 then horizontal = horizontal.Unit end
         local vertical = ((self.upHeld or keys.Up) and 1 or 0)
@@ -293,7 +334,7 @@ function Flight:_bind()
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
             dragging, dragPointer = true, input
-            dragOrigin = input.Position
+            dragOrigin = Vector2.new(input.Position.X, input.Position.Y)
             dragPosition = self.panel.AbsolutePosition
         end
     end)
@@ -307,23 +348,27 @@ function Flight:_bind()
             and (input == dragPointer
                 or (dragPointer and dragPointer.UserInputType == Enum.UserInputType.MouseButton1
                     and input.UserInputType == Enum.UserInputType.MouseMovement)) then
-            local delta = input.Position - dragOrigin
-            local camera = workspace.CurrentCamera
-            if not camera then return end
-            local view = camera.ViewportSize
+            local delta = Vector2.new(input.Position.X, input.Position.Y) - dragOrigin
+            local parent = self.panel.Parent
+            if not parent then return end
+            local view = parent.AbsoluteSize
             local size = self.panel.AbsoluteSize
-            local x = math.clamp(dragPosition.X + delta.X, 4,
-                math.max(4, view.X - size.X - 4))
-            local y = math.clamp(dragPosition.Y + delta.Y, 4,
-                math.max(4, view.Y - size.Y - 4))
+            local x = math.clamp(dragPosition.X + delta.X, 2,
+                math.max(2, view.X - size.X - 2))
+            local y = math.clamp(dragPosition.Y + delta.Y, 2,
+                math.max(2, view.Y - size.Y - 2))
             self.panel.Position = UDim2.fromOffset(x + size.X, y + size.Y * 0.5)
         end
     end)
     self:_listen(uis.InputEnded, function(input)
-        if input == sliderPointer or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input == sliderPointer
+            or (sliderPointer and sliderPointer.UserInputType == Enum.UserInputType.MouseButton1
+                and input.UserInputType == Enum.UserInputType.MouseButton1) then
             sliding, sliderPointer = false, nil
         end
-        if input == dragPointer or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input == dragPointer
+            or (dragPointer and dragPointer.UserInputType == Enum.UserInputType.MouseButton1
+                and input.UserInputType == Enum.UserInputType.MouseButton1) then
             dragging, dragPointer = false, nil
         end
         local keys = self.moving
