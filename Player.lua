@@ -22,6 +22,7 @@ function Flight.new(context)
     local self = setmetatable({}, Flight)
     self.context = context
     self.enabled = false
+    self.flightActive = false
     self.noclipEnabled = false
     self.noclipConnection = nil
     -- Weak keys avoid retaining obsolete character parts after respawn.
@@ -48,13 +49,13 @@ end
 function Flight:_build()
     local gui = self.context.screenGui
     local panel = make("Frame", {
-        Name = "HorizonFlyMiniPanel", Size = UDim2.fromOffset(268, 305),
+        Name = "HorizonFlyMiniPanel", Size = UDim2.fromOffset(235, 260),
         Position = UDim2.new(1, -12, 0.5, 0),
         AnchorPoint = Vector2.new(1, 0.5), Visible = false,
         BackgroundColor3 = Color3.fromRGB(36, 33, 30), BorderSizePixel = 0,
         Active = true, ZIndex = 110
     }, gui)
-    rounded(panel, 16)
+    rounded(panel, 14)
     make("UIStroke", {Color = Color3.fromRGB(106, 85, 64),
         Thickness = 1}, panel)
     self.panel = panel
@@ -82,33 +83,35 @@ function Flight:_build()
         rounded(b, 8)
         return b
     end
-    local drag = button("FlyDragHandle", "", UDim2.fromOffset(6, 5),
-        UDim2.new(1, -54, 0, 35))
+    local drag = button("FlyDragHandle", "", UDim2.fromOffset(0, 0),
+        UDim2.new(1, -38, 0, 37))
     drag.BackgroundTransparency = 1
+    drag.ZIndex = 113
     self.drag = drag
-    local title = text("FlyTitle", "FLY", UDim2.fromOffset(14, 10),
-        UDim2.fromOffset(130, 28), 16, Color3.fromRGB(240, 214, 184))
+    local title = text("FlyTitle", "FLY", UDim2.fromOffset(12, 6),
+        UDim2.fromOffset(130, 26), 15, Color3.fromRGB(240, 214, 184))
     title.Font = Enum.Font.GothamBold
+    title.ZIndex = 114
     self.collapse = button("FlyCollapse", "−",
-        UDim2.new(1, -42, 0, 8), UDim2.fromOffset(30, 28))
+        UDim2.new(1, -37, 0, 5), UDim2.fromOffset(28, 27))
     self.collapse.TextSize = 20
     make("Frame", {
-        Position = UDim2.fromOffset(12, 44),
-        Size = UDim2.new(1, -24, 0, 1),
+        Position = UDim2.fromOffset(10, 37),
+        Size = UDim2.new(1, -20, 0, 1),
         BackgroundColor3 = Color3.fromRGB(80, 68, 56),
         BorderSizePixel = 0, ZIndex = 112
     }, panel)
 
     self.speedLabel = text("FlySpeedCaption", "Скорость полёта",
-        UDim2.fromOffset(14, 52), UDim2.fromOffset(155, 25), 12)
+        UDim2.fromOffset(12, 40), UDim2.fromOffset(135, 21), 11)
     self.speedReadout = text("FlySpeedValue", "50",
-        UDim2.new(1, -104, 0, 52), UDim2.fromOffset(90, 25), 13,
+        UDim2.new(1, -92, 0, 40), UDim2.fromOffset(80, 21), 11,
         Color3.fromRGB(234, 193, 143), Enum.TextXAlignment.Right)
     self.speedReadout.Font = Enum.Font.GothamBold
 
     self.slider = make("TextButton", {
-        Name = "FlySlider", Text = "", Position = UDim2.fromOffset(16, 86),
-        Size = UDim2.new(1, -32, 0, 24), BackgroundTransparency = 1,
+        Name = "FlySlider", Text = "", Position = UDim2.fromOffset(12, 65),
+        Size = UDim2.new(1, -24, 0, 23), BackgroundTransparency = 1,
         AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 113
     }, panel)
     local rail = make("Frame", {
@@ -131,35 +134,42 @@ function Flight:_build()
         BorderSizePixel = 0, Active = false, ZIndex = 115
     }, self.slider)
     rounded(self.knob, 9)
-    text("FlyMin", "0", UDim2.fromOffset(16, 113),
+    text("FlyMin", "0", UDim2.fromOffset(12, 89),
         UDim2.fromOffset(45, 17), 10, Color3.fromRGB(179, 166, 148))
-    text("FlyMax", "1000", UDim2.new(1, -65, 0, 113),
+    text("FlyMax", "1000", UDim2.new(1, -57, 0, 89),
         UDim2.fromOffset(50, 17), 10, Color3.fromRGB(179, 166, 148),
         Enum.TextXAlignment.Right)
 
+    self.manualPanel = make("Frame", {
+        Name = "FlyManualPanel", Position = UDim2.fromOffset(10, 106),
+        Size = UDim2.new(1, -20, 0, 101),
+        BackgroundColor3 = Color3.fromRGB(48, 43, 39),
+        BorderSizePixel = 0, ZIndex = 111
+    }, panel)
+    rounded(self.manualPanel, 9)
     self.manualLabel = text("FlyManualCaption", "Ручной ввод скорости",
-        UDim2.fromOffset(14, 140), UDim2.new(1, -28, 0, 20), 12)
+        UDim2.fromOffset(19, 109), UDim2.new(1, -38, 0, 20), 11)
     self.manualBox = make("TextBox", {
         Name = "FlyManualSpeed", Text = "50",
         PlaceholderText = "0 - 100000000",
-        Size = UDim2.new(1, -28, 0, 34), Position = UDim2.fromOffset(14, 165),
-        BackgroundColor3 = Color3.fromRGB(48, 43, 39),
+        Size = UDim2.new(1, -38, 0, 29), Position = UDim2.fromOffset(19, 131),
+        BackgroundColor3 = Color3.fromRGB(35, 32, 29),
         TextColor3 = Color3.fromRGB(242, 223, 205),
         PlaceholderColor3 = Color3.fromRGB(163, 150, 134),
-        TextSize = 14, Font = Enum.Font.Gotham, ClearTextOnFocus = false,
+        TextSize = 13, Font = Enum.Font.Gotham, ClearTextOnFocus = false,
         TextXAlignment = Enum.TextXAlignment.Center,
         BorderSizePixel = 0, ZIndex = 113
     }, panel)
     rounded(self.manualBox, 8)
     make("UIStroke", {Color = Color3.fromRGB(95, 77, 60),
         Thickness = 1}, self.manualBox)
-    self.apply = button("FlyApply", "Применить",
-        UDim2.fromOffset(14, 206), UDim2.new(1, -28, 0, 30))
-    self.apply.BackgroundColor3 = Color3.fromRGB(87, 63, 44)
+    self.power = button("FlyPower", "Выключить Fly",
+        UDim2.fromOffset(19, 166), UDim2.new(1, -38, 0, 32))
+    self.power.BackgroundColor3 = Color3.fromRGB(104, 57, 53)
     self.up = button("FlyAscend", "↑  Вверх",
-        UDim2.fromOffset(14, 250), UDim2.new(0.5, -18, 0, 37))
+        UDim2.fromOffset(10, 216), UDim2.new(0.5, -15, 0, 35))
     self.down = button("FlyDescend", "↓  Вниз",
-        UDim2.new(0.5, 4, 0, 250), UDim2.new(0.5, -18, 0, 37))
+        UDim2.new(0.5, 5, 0, 216), UDim2.new(0.5, -15, 0, 35))
 end
 
 function Flight:_readSlider(x)
@@ -209,7 +219,7 @@ end
 
 function Flight:_startPhysics()
     self:_stopPhysics()
-    if not self.enabled then return end
+    if not self.enabled or not self.flightActive then return end
     local char = self.context.player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -237,7 +247,7 @@ function Flight:_startPhysics()
     self.gyro = gyro
 
     self.heartbeat = self.runService.Heartbeat:Connect(function()
-        if not self.enabled or not root.Parent or hum.Health <= 0 then
+        if not self.enabled or not self.flightActive or not root.Parent or hum.Health <= 0 then
             self:_stopPhysics()
             return
         end
@@ -352,7 +362,10 @@ function Flight:_bind()
     end
     hold(self.up, true)
     hold(self.down, false)
-    self:_listen(self.apply.Activated, function() self:_applyManual() end)
+    self:_listen(self.power.Activated, function()
+        if self.flightActive then self:pauseFlight()
+        else self:resumeFlight() end
+    end)
     self:_listen(self.manualBox.FocusLost, function(enter)
         if enter then self:_applyManual() end
     end)
@@ -361,12 +374,31 @@ function Flight:_bind()
         self.panel.Visible = false
     end)
     self:_listen(self.context.player.CharacterAdded, function(character)
-        if not self.enabled then return end
+        if not self.enabled or not self.flightActive then return end
         task.defer(function()
             if character:WaitForChild("HumanoidRootPart", 10)
-                and self.enabled then self:_startPhysics() end
+                and self.enabled and self.flightActive then self:_startPhysics() end
         end)
     end)
+end
+
+function Flight:_refreshPower()
+    self.power.Text = self.flightActive and "Выключить Fly" or "Включить Fly"
+    self.power.BackgroundColor3 = self.flightActive
+        and Color3.fromRGB(104, 57, 53) or Color3.fromRGB(65, 106, 69)
+end
+
+function Flight:pauseFlight()
+    self.flightActive = false
+    self:_stopPhysics()
+    self:_refreshPower()
+end
+
+function Flight:resumeFlight()
+    if not self.enabled then return end
+    self.flightActive = true
+    self:_startPhysics()
+    self:_refreshPower()
 end
 
 function Flight:enable()
@@ -375,22 +407,26 @@ function Flight:enable()
         return
     end
     self.enabled = true
+    self.flightActive = true
     local camera = workspace.CurrentCamera
     local size = camera and camera.ViewportSize or Vector2.new(600, 400)
     local target = math.max(0.3, math.min(1,
-        (size.X - 18) / 268, (size.Y - 18) / 305))
+        (size.X - 12) / 235, (size.Y - 12) / 260))
     self.panel.Visible = true
     self.scale.Scale = target * 0.94
     self.context.tweens:Create(self.scale,
         TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
         {Scale = target}):Play()
+    self:_refreshPower()
     self:_startPhysics()
 end
 
 function Flight:disable()
     self.enabled = false
+    self.flightActive = false
     self:_stopPhysics()
     self.panel.Visible = false
+    self:_refreshPower()
 end
 
 -- Noclip uses the same idea as the user's Stepped loop: collisions are
