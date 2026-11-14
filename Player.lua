@@ -23,6 +23,9 @@ function Flight.new(context)
     self.context = context
     self.enabled = false
     self.flightActive = false
+    self.destroyed = false
+    self.freecamEnabled = false
+    self.freecamState = nil
     self.noclipEnabled = false
     self.noclipConnection = nil
     -- Weak keys avoid retaining obsolete character parts after respawn.
@@ -243,11 +246,13 @@ end
 -- Roblox has two generations of built-in controls. Resolve asynchronously:
 -- requires must never suspend the live physics callback or HORIZON startup.
 function Flight:_resolveControls()
+    if self.destroyed then return end
     if self.controls or (self.moveAction and self.moveAction.Parent) then return end
     if self.controlsResolving or os.clock() < (self.nextControlResolve or 0) then return end
     self.controlsResolving = true
     self.nextControlResolve = os.clock() + 2
     task.spawn(function()
+        if self.destroyed then self.controlsResolving = false; return end
         local ok, err = pcall(function()
             local scripts = self.context.player:FindFirstChild("PlayerScripts")
             local playerModule = scripts and scripts:FindFirstChild("PlayerModule")
@@ -271,7 +276,7 @@ function Flight:_resolveControls()
                 local required, api = pcall(require, playerModule)
                 if required and api then
                     local got, controls = pcall(function() return api:GetControls() end)
-                    if got and controls and type(controls.GetMoveVector) == "function" then
+                    if not self.destroyed and got and controls and type(controls.GetMoveVector) == "function" then
                         self.controls = controls
                         return
                     end
@@ -279,7 +284,7 @@ function Flight:_resolveControls()
                 local oldModule = playerModule:FindFirstChild("ControlModule")
                 if oldModule then
                     local loaded, controls = pcall(require, oldModule)
-                    if loaded and controls
+                    if not self.destroyed and loaded and controls
                         and type(controls.GetMoveVector) == "function" then
                         self.controls = controls
                     end
@@ -424,10 +429,193 @@ function Flight:_ensurePhysics()
     end
 end
 
+-- The default Roblox CameraModule supplies orbit, mouse/touch look and zoom.
+-- Only its invisible subject moves: there is no second camera-control UI.
+function Flight:_freecamChanged(enabled)
+    if type(self.context.onFreecamChanged) == "function" then
+        local ok, err = pcall(self.context.onFreecamChanged, enabled)
+        if not ok then warn("[HORIZON Freecam] UI: " .. tostring(err)) end
+    end
+end
+
+function Flight:_attachFreecamCamera(camera, state)
+    if not camera or self.freecamState ~= state then return end
+    if not state.cameras[camera] then
+        state.cameras[camera] = {
+            kind = camera.CameraType, subject = camera.CameraSubject,
+            cframe = camera.CFrame, focus = camera.Focus
+        }
+    end
+    camera.CameraSubject = state.subject
+    camera.CameraType = Enum.CameraType.Custom
+end
+
+function Flight:_stepFreecam(dt, state)
+    if self.freecamState ~= state then return end
+    if self.destroyed or self.context.player.Character ~= state.character
+        or not state.root.Parent or state.humanoid.Health <= 0
+        or not state.subject.Parent then
+        self:disableFreecam()
+        return
+    end
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    self:_attachFreecamCamera(camera, state)
+    -- Default controls continue to produce movement, but the avatar stays put.
+    state.root.Anchored = true
+    state.humanoid.AutoRotate = false
+    state.humanoid.Jump = false
+    if self.windowFocused == false or self.context.userInput:GetFocusedTextBox() then return end
+    local input = self:_getMoveVector()
+    local keys = self.moving
+    local x = input and input.X or ((keys.D and 1 or 0) - (keys.A and 1 or 0))
+    local z = input and input.Z or ((keys.S and 1 or 0) - (keys.W and 1 or 0))
+    if input and input.Magnitude <= 0.01 then
+        x = (keys.D and 1 or 0) - (keys.A and 1 or 0)
+        z = (keys.S and 1 or 0) - (keys.W and 1 or 0)
+    end
+    local direction = camera.CFrame.RightVector * x - camera.CFrame.LookVector * z
+    local up = keys.Up or os.clock() < (state.jumpUntil or 0)
+    local vertical = (up and 1 or 0) - (keys.Down and 1 or 0)
+    direction = direction + Vector3.new(0, vertical, 0)
+    if direction.Magnitude > 1 then direction = direction.Unit end
+    -- A fixed speed avoids inheriting a very large manually entered Fly speed.
+    state.subject.CFrame = state.subject.CFrame + direction * 50 * math.clamp(dt, 0, 0.1)
+end
+
+function Flight:enableFreecam()
+    if self.destroyed then return false, "Player controller has been destroyed" end
+    if self.freecamEnabled then return true end
+    local player = self.context.player
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local camera = workspace.CurrentCamera
+    if not camera or not humanoid or humanoid.Health <= 0 or not root then
+        return false, "Camera or living character unavailable"
+    end
+    self:pauseFlight()
+    local state = {
+        character = character, humanoid = humanoid, root = root,
+        anchored = root.Anchored, autoRotate = humanoid.AutoRotate,
+        cameraMode = player.CameraMode, cameras = {}, connections = {},
+        renderName = "HorizonFreecam_" .. tostring(self)
+    }
+    self.freecamState = state
+    local ok, err = pcall(function()
+        local subject = Instance.new("Part")
+        state.subject = subject
+        subject.Name = "HorizonFreecamSubject"
+        subject.Size = Vector3.new(0.1, 0.1, 0.1)
+        subject.Transparency = 1
+        subject.Anchored = true
+        subject.CanCollide = false
+        subject.CanTouch = false
+        subject.CanQuery = false
+        subject.CFrame = camera.Focus
+        subject.Parent = workspace
+        root.Anchored = true
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        humanoid.AutoRotate = false
+        -- Locked first-person games must still permit ordinary orbit and zoom.
+        if player.CameraMode == Enum.CameraMode.LockFirstPerson then
+            player.CameraMode = Enum.CameraMode.Classic
+        end
+        self:_attachFreecamCamera(camera, state)
+        state.connections[#state.connections + 1] =
+            workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+                if self.freecamState ~= state then return end
+                local attached, reason = pcall(function()
+                    self:_attachFreecamCamera(workspace.CurrentCamera, state)
+                end)
+                if not attached then
+                    self:disableFreecam()
+                    warn("[HORIZON Freecam] Camera changed: " .. tostring(reason))
+                end
+            end)
+        state.connections[#state.connections + 1] = humanoid.Died:Connect(function()
+            if self.freecamState == state then self:disableFreecam() end
+        end)
+        state.connections[#state.connections + 1] = player.CharacterRemoving:Connect(function()
+            if self.freecamState == state then self:disableFreecam() end
+        end)
+        state.connections[#state.connections + 1] = self.context.userInput.JumpRequest:Connect(function()
+            if self.freecamState == state and not self.context.userInput:GetFocusedTextBox() then
+                -- Reuse Roblox's own jump button on touch/gamepad as well as Space.
+                state.jumpUntil = os.clock() + 0.15
+            end
+        end)
+        self.runService:BindToRenderStep(state.renderName,
+            Enum.RenderPriority.Camera.Value - 1, function(dt)
+                local stepped, reason = pcall(function() self:_stepFreecam(dt, state) end)
+                if not stepped and self.freecamState == state then
+                    self:disableFreecam()
+                    warn("[HORIZON Freecam] Stopped after error: " .. tostring(reason))
+                end
+            end)
+        state.bound = true
+        self.freecamEnabled = true
+    end)
+    if not ok then
+        self:disableFreecam()
+        return false, tostring(err)
+    end
+    self:_freecamChanged(true)
+    return true
+end
+
+function Flight:disableFreecam()
+    local state = self.freecamState
+    self.freecamState = nil
+    local wasEnabled = self.freecamEnabled
+    self.freecamEnabled = false
+    if state then
+        if state.bound then
+            pcall(function() self.runService:UnbindFromRenderStep(state.renderName) end)
+        end
+        for _, connection in ipairs(state.connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        pcall(function()
+            if state.root.Parent then state.root.Anchored = state.anchored end
+        end)
+        pcall(function()
+            if state.humanoid.Parent then state.humanoid.AutoRotate = state.autoRotate end
+        end)
+        pcall(function() self.context.player.CameraMode = state.cameraMode end)
+        for camera, saved in pairs(state.cameras) do
+            local subject = saved.subject
+            -- A replacement camera may have copied the temporary freecam subject.
+            if subject == state.subject or (subject and not subject.Parent) then
+                local character = self.context.player.Character
+                subject = character and character:FindFirstChildOfClass("Humanoid")
+            end
+            -- Each property is isolated so one destroyed object cannot block cleanup.
+            pcall(function() camera.CameraSubject = subject end)
+            pcall(function() camera.CameraType = saved.kind end)
+            pcall(function() camera.CFrame = saved.cframe end)
+            pcall(function() camera.Focus = saved.focus end)
+        end
+        if state.subject then pcall(function() state.subject:Destroy() end) end
+    end
+    if wasEnabled or state then self:_freecamChanged(false) end
+end
+
 function Flight:_bind()
     local uis = self.context.userInput
     local dragging, dragPointer, dragOrigin, dragPosition = false, nil, nil, nil
     local sliding, sliderPointer = false, nil
+
+    self:_listen(uis.WindowFocusReleased, function()
+        self.windowFocused = false
+        for key in pairs(self.moving) do self.moving[key] = false end
+        self.upHeld, self.downHeld = false, false
+        dragging, sliding = false, false
+        if self.freecamState then self.freecamState.jumpUntil = nil end
+    end)
+    self:_listen(uis.WindowFocused, function() self.windowFocused = true end)
+    self:_listen(self.context.screenGui.Destroying, function() self:destroy() end)
 
     self:_listen(self.slider.InputBegan, function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -531,10 +719,12 @@ function Flight:_bind()
         self.panel.Visible = false
     end)
     self:_listen(self.context.player.CharacterAdded, function(character)
+        if self.destroyed then return end
+        self:disableFreecam()
         -- Speed and jump settings persist through respawn even without Fly.
         task.defer(function()
             local humanoid = character:WaitForChild("Humanoid", 10)
-            if humanoid and self.context.player.Character == character then
+            if not self.destroyed and humanoid and self.context.player.Character == character then
                 local ok, err = pcall(function() self:_applyStatOverrides(humanoid) end)
                 if not ok then warn("[HORIZON Stats] Respawn: " .. tostring(err)) end
             end
@@ -542,6 +732,7 @@ function Flight:_bind()
         if not self.enabled or not self.flightActive then return end
         task.defer(function()
             if character:WaitForChild("HumanoidRootPart", 10)
+                and not self.destroyed and self.context.player.Character == character
                 and self.enabled and self.flightActive then self:_ensurePhysics() end
         end)
     end)
@@ -581,13 +772,15 @@ function Flight:pauseFlight()
 end
 
 function Flight:resumeFlight()
-    if not self.enabled then return end
+    if self.destroyed or not self.enabled then return end
+    self:disableFreecam()
     self.flightActive = true
     self:_ensurePhysics()
     self:_refreshPower()
 end
 
 function Flight:enable()
+    if self.destroyed then return end
     if self.enabled then
         -- Main HORIZON switch only reveals the controller.
         -- Reopening must never automatically resume flight.
@@ -698,11 +891,10 @@ end
 function Flight:_restoreStatOverrides()
     local humanoid = self:_statHumanoid()
     local original = humanoid and self.statOriginals[humanoid]
-    if not original then return end
-    if self.walkOverride ~= nil then
+    if original and self.walkOverride ~= nil then
         pcall(function() humanoid.WalkSpeed = original.walkSpeed end)
     end
-    if self.jumpOverride ~= nil then
+    if original and self.jumpOverride ~= nil then
         pcall(function()
             humanoid.JumpPower = original.jumpPower
             humanoid.JumpHeight = original.jumpHeight
@@ -782,6 +974,9 @@ function Flight:disableNoclip()
 end
 
 function Flight:destroy()
+    if self.destroyed then return end
+    self.destroyed = true
+    self:disableFreecam()
     self:disableNoclip()
     self:disable()
     self:_restoreStatOverrides()
@@ -800,3 +995,4 @@ return {
         return Flight.new(context)
     end
 }
+
