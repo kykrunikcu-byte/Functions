@@ -233,7 +233,6 @@ function Flight:_stopPhysics()
     self.root = nil
     self.upHeld = false
     self.downHeld = false
-    self.smoothedVelocity = Vector3.zero
     if self.power then self:_refreshPower() end
 end
 
@@ -336,7 +335,7 @@ function Flight:_startPhysics()
     local velocity = Instance.new("BodyVelocity")
     velocity.Name = "HorizonFlyVelocity"
     velocity.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-    velocity.P = 1250
+    velocity.P = 12500
     velocity.Velocity = Vector3.zero
     velocity.Parent = root
     self.velocity = velocity
@@ -349,9 +348,8 @@ function Flight:_startPhysics()
     gyro.CFrame = root.CFrame
     gyro.Parent = root
     self.gyro = gyro
-    self.smoothedVelocity = Vector3.zero
 
-    self.heartbeat = self.runService.Heartbeat:Connect(function(dt)
+    self.heartbeat = self.runService.Heartbeat:Connect(function()
         if not self.enabled or not self.flightActive or not self:_physicsReady() then
             self:_stopPhysics()
             return
@@ -386,12 +384,13 @@ function Flight:_startPhysics()
         direction = direction + Vector3.new(0, vertical, 0)
         if direction.Magnitude > 1 then direction = direction.Unit end
 
-        -- Responsive easing rather than snapping the avatar to a hard velocity.
+        -- Direct response: no Lerp, acceleration curve or residual glide.
+        -- Setting assembly velocity gives an immediate start and hard stop;
+        -- BodyVelocity then keeps the character hovering between physics steps.
         local target = direction * self.speed
-        local alpha = math.clamp((dt or 1 / 60) * 12, 0, 1)
-        self.smoothedVelocity = self.smoothedVelocity:Lerp(target, alpha)
-        velocity.Velocity = self.smoothedVelocity
-        -- Match the reference Fly: follow the camera with gentler BodyGyro.
+        velocity.Velocity = target
+        root.AssemblyLinearVelocity = target
+        -- Preserve the already-approved character orientation with the camera.
         gyro.CFrame = camera.CFrame
     end)
     self:_refreshPower()
@@ -508,8 +507,16 @@ function Flight:_bind()
     hold(self.up, true)
     hold(self.down, false)
     self:_listen(self.power.Activated, function()
-        if self.flightActive then self:pauseFlight()
-        else self:resumeFlight() end
+        -- Execute the action shown on the button, not a second, potentially
+        -- stale boolean. _refreshPower writes both the caption and action.
+        local action = self.power:GetAttribute("FlyNextAction")
+        if action == "enable" then
+            self:resumeFlight()
+        elseif action == "disable" then
+            self:pauseFlight()
+        else
+            self:_refreshPower()
+        end
     end)
     self:_listen(self.manualBox.FocusLost, function(enter)
         if enter then self:_applyManual() end
@@ -538,8 +545,12 @@ end
 
 function Flight:_refreshPower()
     local requested = self.enabled and self.flightActive
-    self.power.Text = requested and "Выключить Fly" or "Включить Fly"
-    -- Amber means requested but waiting for a valid character/physics.
+    -- One source of truth: the button's command is always its visible label.
+    -- When Fly is active, the available action is to switch it off.
+    local nextAction = requested and "disable" or "enable"
+    self.power:SetAttribute("FlyNextAction", nextAction)
+    self.power.Text = nextAction == "enable" and "Включить Fly" or "Выключить Fly"
+    -- Amber means flight was requested but the character is not ready yet.
     self.power.BackgroundColor3 = requested
         and (self:_physicsReady() and Color3.fromRGB(104, 57, 53)
             or Color3.fromRGB(130, 94, 47))
