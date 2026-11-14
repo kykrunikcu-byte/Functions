@@ -712,6 +712,29 @@ function Flight:_restoreStatOverrides()
     self.jumpOverride = nil
 end
 
+-- Gravity is a client-side Workspace setting, not a Humanoid property.
+-- Capture the game's current value the first time the player overrides it.
+function Flight:setGravity(value)
+    if type(value) ~= "number" or value < 0 or value > 100000
+        or value ~= value or value == math.huge then
+        return false, "Gravity must be 0..100000"
+    end
+    local original = self.originalGravity
+    if original == nil then original = workspace.Gravity end
+    local ok, err = pcall(function() workspace.Gravity = value end)
+    if not ok then return false, tostring(err) end
+    self.originalGravity = original
+    return true
+end
+
+function Flight:resetGravity()
+    if self.originalGravity ~= nil then
+        workspace.Gravity = self.originalGravity
+        self.originalGravity = nil
+    end
+    return workspace.Gravity
+end
+
 -- Noclip uses the same idea as the user's Stepped loop: collisions are
 -- disabled again before simulation, because some games reset CanCollide.
 -- Each original value is remembered once and restored when switched off.
@@ -762,6 +785,9 @@ function Flight:destroy()
     self:disableNoclip()
     self:disable()
     self:_restoreStatOverrides()
+    -- Restore gravity even if the current character no longer exists.
+    local gravityOK, gravityError = pcall(function() self:resetGravity() end)
+    if not gravityOK then warn("[HORIZON Gravity] Reset: " .. tostring(gravityError)) end
     for _, connection in ipairs(self.connections) do
         pcall(function() connection:Disconnect() end)
     end
