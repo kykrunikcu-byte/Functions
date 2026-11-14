@@ -372,8 +372,11 @@ function Flight:_startPhysics()
 
         local direction = camera.CFrame.RightVector * x
             - camera.CFrame.LookVector * z
-        -- Use world-space fallback only when no working module/keys are moving.
-        if math.abs(x) < 0.01 and math.abs(z) < 0.01 then
+        -- The Roblox controls module returning zero means RELEASED.
+        -- Never override that with stale Humanoid.MoveDirection, otherwise
+        -- the avatar may keep sliding after the player lets go of the stick.
+        -- Only use MoveDirection if no controls module is available.
+        if input == nil and keyX == 0 and keyZ == 0 then
             local move = humanoid.MoveDirection
             if move.Magnitude > 0.01 then
                 direction = move
