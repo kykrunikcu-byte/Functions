@@ -163,7 +163,7 @@ function Flight:_build()
     rounded(self.manualBox, 8)
     make("UIStroke", {Color = Color3.fromRGB(95, 77, 60),
         Thickness = 1}, self.manualBox)
-    self.power = button("FlyPower", "Выключить Fly",
+    self.power = button("FlyPower", "Выключено",
         UDim2.fromOffset(19, 166), UDim2.new(1, -38, 0, 32))
     self.power.BackgroundColor3 = Color3.fromRGB(104, 57, 53)
     self.up = button("FlyAscend", "↑  Вверх",
@@ -199,8 +199,8 @@ function Flight:_applyManual()
     self.speedReadout.Text = tostring(value)
 end
 
--- The main Fly switch and the mini-panel button request flight independently
--- of whether a valid character has finished loading.
+-- The main HORIZON switch opens the panel; only its inner power button
+-- requests flight. A character may still take time to become available.
 function Flight:_physicsReady()
     local character = self.context.player.Character
     return self.heartbeat ~= nil
@@ -510,15 +510,13 @@ function Flight:_bind()
     hold(self.up, true)
     hold(self.down, false)
     self:_listen(self.power.Activated, function()
-        -- Execute the action shown on the button, not a second, potentially
-        -- stale boolean. _refreshPower writes both the caption and action.
-        local action = self.power:GetAttribute("FlyNextAction")
-        if action == "enable" then
-            self:resumeFlight()
-        elseif action == "disable" then
+        -- The label displays CURRENT status, never a future action.
+        -- Only the mini-panel button may start or stop flight physics.
+        if not self.enabled then return end
+        if self.flightActive then
             self:pauseFlight()
         else
-            self:_refreshPower()
+            self:resumeFlight()
         end
     end)
     self:_listen(self.manualBox.FocusLost, function(enter)
@@ -547,17 +545,21 @@ function Flight:_bind()
 end
 
 function Flight:_refreshPower()
+    -- State label: OFF -> "Выключено", ACTIVE -> "Включено".
+    -- A pending character/physics setup gets its own honest status.
     local requested = self.enabled and self.flightActive
-    -- One source of truth: the button's command is always its visible label.
-    -- When Fly is active, the available action is to switch it off.
-    local nextAction = requested and "disable" or "enable"
-    self.power:SetAttribute("FlyNextAction", nextAction)
-    self.power.Text = nextAction == "enable" and "Включить Fly" or "Выключить Fly"
-    -- Amber means flight was requested but the character is not ready yet.
-    self.power.BackgroundColor3 = requested
-        and (self:_physicsReady() and Color3.fromRGB(104, 57, 53)
-            or Color3.fromRGB(130, 94, 47))
-        or Color3.fromRGB(65, 106, 69)
+    local running = requested and self:_physicsReady()
+    self.power:SetAttribute("FlyActive", running and true or false)
+    if not requested then
+        self.power.Text = "Выключено"
+        self.power.BackgroundColor3 = Color3.fromRGB(104, 57, 53)
+    elseif not running then
+        self.power.Text = "Запуск..."
+        self.power.BackgroundColor3 = Color3.fromRGB(130, 94, 47)
+    else
+        self.power.Text = "Включено"
+        self.power.BackgroundColor3 = Color3.fromRGB(65, 106, 69)
+    end
 end
 
 function Flight:pauseFlight()
@@ -575,13 +577,14 @@ end
 
 function Flight:enable()
     if self.enabled then
+        -- Main HORIZON switch only reveals the controller.
+        -- Reopening must never automatically resume flight.
         self.panel.Visible = true
-        if self.flightActive then self:_ensurePhysics() end
         self:_refreshPower()
         return
     end
     self.enabled = true
-    self.flightActive = true
+    self.flightActive = false
     local camera = workspace.CurrentCamera
     local size = camera and camera.ViewportSize or Vector2.new(600, 400)
     local target = math.max(0.3, math.min(1,
@@ -591,7 +594,7 @@ function Flight:enable()
     self.context.tweens:Create(self.scale,
         TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
         {Scale = target}):Play()
-    self:_ensurePhysics()
+    -- Opening the panel is not consent to start flying.
     self:_refreshPower()
 end
 
