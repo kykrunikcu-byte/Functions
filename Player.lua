@@ -30,6 +30,10 @@ function Flight.new(context)
     self.speed = 50
     self.sliderValue = 50
     self.manualValue = 50
+    -- Player stats are independent of Fly/Noclip. Nil means unmodified.
+    self.walkOverride = nil
+    self.jumpOverride = nil
+    self.statOriginals = setmetatable({}, {__mode = "k"})
     self.connections = {}
     self.moving = {W = false, A = false, S = false, D = false, Up = false, Down = false}
     self.upHeld = false
@@ -527,6 +531,14 @@ function Flight:_bind()
         self.panel.Visible = false
     end)
     self:_listen(self.context.player.CharacterAdded, function(character)
+        -- Speed and jump settings persist through respawn even without Fly.
+        task.defer(function()
+            local humanoid = character:WaitForChild("Humanoid", 10)
+            if humanoid and self.context.player.Character == character then
+                local ok, err = pcall(function() self:_applyStatOverrides(humanoid) end)
+                if not ok then warn("[HORIZON Stats] Respawn: " .. tostring(err)) end
+            end
+        end)
         if not self.enabled or not self.flightActive then return end
         task.defer(function()
             if character:WaitForChild("HumanoidRootPart", 10)
@@ -606,6 +618,100 @@ function Flight:disable()
     self:_refreshPower()
 end
 
+-- Movement properties are applied only to this player's Humanoid.
+-- Preserve the game's original values so Reset and HORIZON shutdown are safe.
+function Flight:_statHumanoid()
+    local character = self.context.player.Character
+    return character and character:FindFirstChildOfClass("Humanoid") or nil
+end
+
+function Flight:_statSnapshot(humanoid)
+    local snapshot = self.statOriginals[humanoid]
+    if not snapshot then
+        snapshot = {
+            walkSpeed = humanoid.WalkSpeed,
+            jumpPower = humanoid.JumpPower,
+            jumpHeight = humanoid.JumpHeight
+        }
+        self.statOriginals[humanoid] = snapshot
+    end
+    return snapshot
+end
+
+function Flight:_applyStatOverrides(humanoid)
+    humanoid = humanoid or self:_statHumanoid()
+    if not humanoid or humanoid.Health <= 0 then return true end
+    if self.walkOverride == nil and self.jumpOverride == nil then return true end
+    self:_statSnapshot(humanoid)
+    if self.walkOverride ~= nil then
+        humanoid.WalkSpeed = self.walkOverride
+    end
+    if self.jumpOverride ~= nil then
+        -- Depending on the game's mode, Roblox reads one of these properties.
+        if humanoid.UseJumpPower then
+            humanoid.JumpPower = self.jumpOverride
+        else
+            humanoid.JumpHeight = self.jumpOverride
+        end
+    end
+    return true
+end
+
+local function validStatValue(value)
+    return type(value) == "number"
+        and value >= 0 and value <= 10000000
+        and value == value and value ~= math.huge
+end
+
+function Flight:setWalkSpeed(value)
+    if not validStatValue(value) then return false, "Speed must be 0..10000000" end
+    self.walkOverride = value
+    return self:_applyStatOverrides()
+end
+
+function Flight:setJumpPower(value)
+    if not validStatValue(value) then return false, "Jump must be 0..10000000" end
+    self.jumpOverride = value
+    return self:_applyStatOverrides()
+end
+
+function Flight:resetWalkSpeed()
+    self.walkOverride = nil
+    local humanoid = self:_statHumanoid()
+    local original = humanoid and self.statOriginals[humanoid]
+    if original then humanoid.WalkSpeed = original.walkSpeed end
+    return humanoid and humanoid.WalkSpeed or 16
+end
+
+function Flight:resetJumpPower()
+    self.jumpOverride = nil
+    local humanoid = self:_statHumanoid()
+    local original = humanoid and self.statOriginals[humanoid]
+    if original then
+        humanoid.JumpPower = original.jumpPower
+        humanoid.JumpHeight = original.jumpHeight
+    end
+    if not humanoid then return 50 end
+    return humanoid.UseJumpPower and humanoid.JumpPower or humanoid.JumpHeight
+end
+
+function Flight:_restoreStatOverrides()
+    local humanoid = self:_statHumanoid()
+    local original = humanoid and self.statOriginals[humanoid]
+    if not original then return end
+    if self.walkOverride ~= nil then
+        pcall(function() humanoid.WalkSpeed = original.walkSpeed end)
+    end
+    if self.jumpOverride ~= nil then
+        pcall(function()
+            humanoid.JumpPower = original.jumpPower
+            humanoid.JumpHeight = original.jumpHeight
+        end)
+    end
+    self.walkOverride = nil
+    self.jumpOverride = nil
+end
+
 -- Noclip uses the same idea as the user's Stepped loop: collisions are
 -- disabled again before simulation, because some games reset CanCollide.
 -- Each original value is remembered once and restored when switched off.
@@ -655,6 +761,7 @@ end
 function Flight:destroy()
     self:disableNoclip()
     self:disable()
+    self:_restoreStatOverrides()
     for _, connection in ipairs(self.connections) do
         pcall(function() connection:Disconnect() end)
     end
